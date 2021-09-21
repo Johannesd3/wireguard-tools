@@ -18,6 +18,7 @@ MTU=""
 DNS=( )
 DNS_SEARCH=( )
 TABLE=""
+SOCKET_NAMESPACE=""
 PRE_UP=( )
 POST_UP=( )
 PRE_DOWN=( )
@@ -60,6 +61,7 @@ parse_options() {
 			DNS) for v in ${value//,/ }; do
 				[[ $v =~ (^[0-9.]+$)|(^.*:.*$) ]] && DNS+=( $v ) || DNS_SEARCH+=( $v )
 			done; continue ;;
+			SocketNamespace) SOCKET_NAMESPACE="$value"; continue ;;
 			Table) TABLE="$value"; continue ;;
 			PreUp) PRE_UP+=( "$value" ); continue ;;
 			PreDown) PRE_DOWN+=( "$value" ); continue ;;
@@ -86,13 +88,19 @@ auto_su() {
 }
 
 add_if() {
-	local ret
-	if ! cmd ip link add "$INTERFACE" type wireguard; then
+	local ret netnsexec
+
+	[[ -n "$SOCKET_NAMESPACE" ]] && netnsexec="ip netns exec $SOCKET_NAMESPACE"
+
+	if ! cmd $netnsexec ip link add "$INTERFACE" type wireguard; then
 		ret=$?
+		[[ -n "$SOCKET_NAMESPACE" ]] && ( ip netns pids "$SOCKET_NAMESPACE" > /dev/null || die "\`$SOCKET_NAMESPACE' is no valid network namespace" )
 		[[ -e /sys/module/wireguard ]] || ! command -v "${WG_QUICK_USERSPACE_IMPLEMENTATION:-wireguard-go}" >/dev/null && exit $ret
 		echo "[!] Missing WireGuard kernel module. Falling back to slow userspace implementation." >&2
-		cmd "${WG_QUICK_USERSPACE_IMPLEMENTATION:-wireguard-go}" "$INTERFACE"
+		cmd $netnsexec "${WG_QUICK_USERSPACE_IMPLEMENTATION:-wireguard-go}" "$INTERFACE"
 	fi
+
+	[[ -n "$SOCKET_NAMESPACE" ]] && cmd $netnsexec ip link set dev "$INTERFACE" netns $$
 }
 
 del_if() {
@@ -262,6 +270,7 @@ save_config() {
 		[[ $address =~ ^nameserver\ ([a-zA-Z0-9_=+:%.-]+)$ ]] && new_config+="DNS = ${BASH_REMATCH[1]}"$'\n'
 	done < <(resolvconf -l "$(resolvconf_iface_prefix)$INTERFACE" 2>/dev/null || cat "/etc/resolvconf/run/interface/$(resolvconf_iface_prefix)$INTERFACE" 2>/dev/null)
 	[[ -n $MTU && $(ip link show dev "$INTERFACE") =~ mtu\ ([0-9]+) ]] && new_config+="MTU = ${BASH_REMATCH[1]}"$'\n'
+	[[ -n $SOCKET_NAMESPACE ]] && new_config+="SocketNamespace = $SOCKET_NAMESPACE"$'\n'
 	[[ -n $TABLE ]] && new_config+="Table = $TABLE"$'\n'
 	[[ $SAVE_CONFIG -eq 0 ]] || new_config+=$'SaveConfig = true\n'
 	for cmd in "${PRE_UP[@]}"; do
